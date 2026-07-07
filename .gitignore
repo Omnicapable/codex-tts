@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.tmp
+*.bak
+*.prev
+tts_watcher_state.json
+tts_watcher_log.txt
+tts_watcher_log.txt.prev
+codex_tts_watcher_log.txt
+codex_tts_watcher_log.txt.prev
+*.onnx
+voices-v1.0.bin
+.DS_Store
+Thumbs.db
