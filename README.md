@@ -1,14 +1,15 @@
 <p align="center">
-  <img src="assets/banner.png" alt="Omnicapable Voice for Codex, local offline text-to-speech" width="880">
+  <img src="assets/banner.png" alt="Omnicapable Voice for Codex, local offline text-to-speech" width="880"><br>
+  <img src="assets/waveform.gif" alt="Voice waveform" width="480">
 </p>
 
 <div align="center">
 
 # Omnicapable Voice for Codex
 
-![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-green) ![Offline](https://img.shields.io/badge/runs-100%25%20offline-green) ![Free](https://img.shields.io/badge/cost-free-green)
+![Cost Free](https://img.shields.io/badge/Cost-Free-green) ![Runs 100% Offline](https://img.shields.io/badge/Runs-100%25%20Offline-green) ![Platform Windows macOS](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-green) ![License MIT](https://img.shields.io/badge/License-MIT-green)
 
-[Install](#install) · [How it works](#how-it-works) · [Controls](#controls) · [Uninstall](#uninstall)
+[Install](#install) · [How it works](#how-it-works) · [Controls](#controls) · [Troubleshooting](#troubleshooting) · [Uninstall](#uninstall)
 
 </div>
 
@@ -40,14 +41,6 @@ This is not a generic text-to-speech add-on. It is built for coding agents:
 
 ---
 
-## Requirements
-
-- Windows 10/11 or macOS 12+
-- Python 3.9+
-- Codex installed and writing session rollout files under `~/.codex/sessions`
-
----
-
 ## Install
 
 Setup takes just a few clicks and configures everything for you automatically.
@@ -75,6 +68,15 @@ The installer sets up everything for you automatically (one time, mostly a model
 3. Writes the watcher script
 4. Sets up auto-start (Windows: scheduled task watchdog; macOS: launchd)
 5. Launches the server and watcher immediately
+
+<details>
+<summary><b>Requirements</b></summary>
+
+- Windows 10/11 or macOS 12+
+- Python 3.9+
+- Codex installed and writing session rollout files under `~/.codex/sessions`
+
+</details>
 
 ---
 
@@ -136,6 +138,10 @@ Type an instruction to Codex, or run the scripts yourself. See also [Shared togg
 
 Voice and speed scripts live in `%USERPROFILE%\.claude\kokoro\`. The stop hotkey works globally from any window; on macOS, grant Accessibility permission when prompted (System Settings, Privacy and Security, Accessibility).
 
+<p align="center">
+  <img src="assets/voices.png" alt="The 27 available voices, by accent and gender" width="820">
+</p>
+
 <details>
 <summary><b>All 27 voices and previews</b></summary>
 
@@ -190,6 +196,26 @@ The shared Kokoro server cleans the text before synthesising. These are silently
 | `~\.codex\tts\codex_tts_watcher_log.txt` | Startup, tracked files, speech events |
 
 Logs rotate automatically at 1 MB (`.prev` keeps the previous file).
+
+---
+
+## Troubleshooting
+
+**Nothing is spoken.** Confirm the pieces are running and enabled:
+- Check `~\.codex\tts\codex_tts_watcher_log.txt` for recent activity (see Log file above).
+- Make sure `%USERPROFILE%\.claude\tts_enabled.txt` contains `on`.
+- Make sure the Kokoro server is up on port 59001.
+
+**It reads Codex's status updates, not just answers.** You are in `all` message mode. Switch back to final-only:
+```cmd
+echo final > "%USERPROFILE%\.claude\codex_tts_message_mode.txt"
+```
+
+**A reply was skipped.** Codex TTS ignores replies older than 3 minutes and waits out a short cooldown if the voice engine was briefly down. Trigger a new reply and it should speak.
+
+**The stop hotkey does nothing on macOS.** Grant Accessibility permission: System Settings, Privacy and Security, Accessibility.
+
+**Two voices speak the same reply.** Only one Codex watcher runs at a time (single-instance lock on UDP 59003). If you also run Claude Code or Claude Cowork TTS, they read different sources and will not double-speak Codex.
 
 ---
 
