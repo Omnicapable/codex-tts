@@ -43,7 +43,7 @@ echo "      Found: $($PYTHON --version) at $PYTHON"
 
 # --- 2. Install Python packages ------------------------------------------------
 echo "[2/7] Installing Python packages..."
-$PYTHON -m pip install kokoro-onnx sounddevice numpy pynput --quiet
+$PYTHON -m pip install kokoro-onnx sounddevice numpy --quiet
 echo "      Done."
 
 # --- 3. Create folders ---------------------------------------------------------
@@ -980,26 +980,35 @@ else
   echo "      Kokoro server plist already present — skipping."
 fi
 
-# --- Ctrl+Option+X global stop hotkey (pynput; needs Accessibility permission) ---
+# --- Ctrl+Option+X global stop hotkey (Carbon RegisterEventHotKey; NO permission prompt) ---
 HOTKEY_PLIST_LABEL="com.user.kokoro-tts-hotkey"
 HOTKEY_PLIST_PATH="$HOME/Library/LaunchAgents/$HOTKEY_PLIST_LABEL.plist"
 cat > "$KOKORO_DIR/tts_hotkey.py" << 'PYEOF'
 # -*- coding: utf-8 -*-
 """
 Safe global TTS hotkey daemon (macOS).
-Registers Ctrl+Option+X via pynput and sends Kokoro's shared __STOP__ command to
-127.0.0.1:59001. Requires Accessibility permission for the launching process
-(System Settings > Privacy & Security > Accessibility). Without it the hotkey
-silently does nothing — a macOS security requirement, not a bug.
+Registers Ctrl+Option+X via Carbon's RegisterEventHotKey and sends Kokoro's
+shared __STOP__ command to 127.0.0.1:59001. RegisterEventHotKey is NOT gated by
+Accessibility or Input Monitoring, so NO permission prompt is ever shown —
+unlike a pynput / CGEventTap approach.
 """
+import ctypes
+import ctypes.util
 import os
 import socket
-import subprocess
 import time
 
 HOST = "127.0.0.1"
 PORT = 59001
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "tts_hotkey.log")
+
+# Carbon modifier masks (these are NOT CGEventFlags values):
+CONTROL_KEY = 0x1000
+OPTION_KEY  = 0x0800
+KEY_X       = 0x07                 # kVK_ANSI_X
+EVENT_CLASS_KEYBOARD = 0x6B657962  # 'keyb'
+EVENT_HOTKEY_PRESSED = 5           # kEventHotKeyPressed
+kProcessTransformToUIElementApplication = 4
 
 
 def log(message):
@@ -1021,15 +1030,66 @@ def send_stop():
         log(f"Ctrl+Option+X failed to send __STOP__: {exc}")
 
 
+class EventTypeSpec(ctypes.Structure):
+    _fields_ = [("eventClass", ctypes.c_uint32), ("eventKind", ctypes.c_uint32)]
+
+
+class EventHotKeyID(ctypes.Structure):
+    _fields_ = [("signature", ctypes.c_uint32), ("id", ctypes.c_uint32)]
+
+
+class ProcessSerialNumber(ctypes.Structure):
+    _fields_ = [("highLongOfPSN", ctypes.c_uint32), ("lowLongOfPSN", ctypes.c_uint32)]
+
+
+carbon = ctypes.CDLL(ctypes.util.find_library("Carbon"))
+
+carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
+carbon.GetApplicationEventTarget.argtypes = []
+carbon.InstallEventHandler.restype = ctypes.c_int32
+carbon.InstallEventHandler.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong,
+                                       ctypes.POINTER(EventTypeSpec), ctypes.c_void_p, ctypes.c_void_p]
+carbon.RegisterEventHotKey.restype = ctypes.c_int32
+carbon.RegisterEventHotKey.argtypes = [ctypes.c_uint32, ctypes.c_uint32, EventHotKeyID,
+                                       ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
+carbon.RunApplicationEventLoop.restype = None
+carbon.RunApplicationEventLoop.argtypes = []
+
+# OSStatus handler(EventHandlerCallRef, EventRef, void *userData)
+HANDLER = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+
+
+def _on_hotkey(_call_ref, _event, _user_data):
+    send_stop()
+    return 0
+
+
+# Keep a reference so the trampoline isn't garbage-collected.
+_handler_ref = HANDLER(_on_hotkey)
+
+
 def main():
+    # Detach from the Dock but stay able to receive events.
     try:
-        from pynput import keyboard
-    except Exception as exc:
-        log(f"pynput unavailable, hotkey disabled: {exc}")
+        psn = ProcessSerialNumber(0, 2)  # {0, kCurrentProcess}
+        carbon.TransformProcessType(ctypes.byref(psn),
+                                    kProcessTransformToUIElementApplication)
+    except Exception:
+        pass
+
+    target = carbon.GetApplicationEventTarget()
+    spec = EventTypeSpec(EVENT_CLASS_KEYBOARD, EVENT_HOTKEY_PRESSED)
+    carbon.InstallEventHandler(target, _handler_ref, 1, ctypes.byref(spec), None, None)
+
+    hotkey_ref = ctypes.c_void_p()
+    status = carbon.RegisterEventHotKey(KEY_X, CONTROL_KEY | OPTION_KEY,
+                                        EventHotKeyID(0x54545353, 1), target, 0,
+                                        ctypes.byref(hotkey_ref))
+    if status != 0:
+        log(f"RegisterEventHotKey FAILED (status {status}); Ctrl+Option+X may be taken.")
         return
-    log("Hotkey daemon starting (Ctrl+Option+X). Needs Accessibility permission.")
-    with keyboard.GlobalHotKeys({"<ctrl>+<alt>+x": send_stop}) as h:
-        h.join()
+    log("Registered Ctrl+Option+X (Carbon, no permission needed).")
+    carbon.RunApplicationEventLoop()
 
 
 if __name__ == "__main__":
@@ -1060,9 +1120,7 @@ cat > "$HOTKEY_PLIST_PATH" << PLISTEOF
 PLISTEOF
 launchctl bootout "gui/$(id -u)/$HOTKEY_PLIST_LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$HOTKEY_PLIST_PATH" 2>/dev/null || true
-echo "      Ctrl+Option+X stop hotkey installed (pynput)."
-echo "      IMPORTANT: macOS needs Accessibility permission for the hotkey to work:"
-echo "        System Settings > Privacy & Security > Accessibility  (add & enable: $PYTHON)"
+echo "      Ctrl+Option+X stop hotkey installed (no permission prompt needed)."
 
 cat > "$WATCHER_PLIST_PATH" << PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
