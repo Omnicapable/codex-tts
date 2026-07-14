@@ -98,14 +98,21 @@ _stop_event  = threading.Event()
 _last_text  = ""      # last text spoken, for __REPLAY__
 _last_voice = None
 
+_last_utterance_ts = 0.0
 def _refresh_audio_device():
-    # sounddevice/PortAudio caches the output device at startup and does NOT
-    # follow when the user switches output (AirPods/headphones/Bluetooth).
-    # Re-initialising PortAudio makes the next playback use the current default.
-    try:
-        sd._terminate(); sd._initialize()
-    except Exception:
-        pass
+    # Follow output-device switches (AirPods/headphones/Bluetooth) WITHOUT tearing
+    # down PortAudio on every utterance — that was fragile (macOS PaMacCore -50).
+    # Only re-scan devices after an idle gap (between bursts, not mid-burst), so a
+    # rapid run of replies doesn't thrash the audio backend.
+    global _last_utterance_ts
+    now = time.time()
+    idle = now - _last_utterance_ts
+    _last_utterance_ts = now
+    if idle > 8.0:
+        try:
+            sd._terminate(); sd._initialize()
+        except Exception:
+            pass
 
 def clean_text(text):
     text = re.sub(r'(?m)(\|[^\n]+\|\n?)+', ' attached table. ', text)
