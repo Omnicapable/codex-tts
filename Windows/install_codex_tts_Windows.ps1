@@ -88,6 +88,17 @@ sd.wait()
 
 _speak_lock = threading.Semaphore(1)
 _stop_event  = threading.Event()
+_last_text  = ""      # last text spoken, for __REPLAY__
+_last_voice = None
+
+def _refresh_audio_device():
+    # sounddevice/PortAudio caches the output device at startup and does NOT
+    # follow when the user switches output (AirPods/headphones/Bluetooth).
+    # Re-initialising PortAudio makes the next playback use the current default.
+    try:
+        sd._terminate(); sd._initialize()
+    except Exception:
+        pass
 
 def clean_text(text):
     text = re.sub(r'(?m)(\|[^\n]+\|\n?)+', ' attached table. ', text)
@@ -155,6 +166,7 @@ def speak(text, voice_override=None):
         wav_queue.put(None)
 
     threading.Thread(target=producer, daemon=True).start()
+    _refresh_audio_device()
 
     while True:
         item = wav_queue.get()
@@ -171,6 +183,7 @@ def speak(text, voice_override=None):
             break
 
 def handle_client(conn):
+    global _last_text, _last_voice
     with conn:
         data = b""
         while True:
@@ -202,6 +215,10 @@ def handle_client(conn):
             except Exception: pass
             return
 
+        if text == "__REPLAY__":
+            if _last_text:
+                with _speak_lock: speak(_last_text, voice_override=_last_voice)
+            return
         if text:
             # Per-request voice prefix: "VOICE=af_sky|actual text"
             req_voice = None
@@ -209,6 +226,7 @@ def handle_client(conn):
                 prefix, text = text.split("|", 1)
                 req_voice = prefix[6:].strip()
             if text:
+                _last_text, _last_voice = text, req_voice
                 with _speak_lock: speak(text, voice_override=req_voice)
 
 def run_server():
@@ -982,10 +1000,12 @@ import time
 
 HOST = "127.0.0.1"
 PORT = 59001
-HOTKEY_ID = 0x545453
+HOTKEY_ID = 0x545453          # stop   (Ctrl+Alt+X)
+HOTKEY_ID_REPLAY = 0x545454   # replay (Ctrl+Alt+R)
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 VK_X = 0x58
+VK_R = 0x52
 WM_HOTKEY = 0x0312
 ERROR_ALREADY_EXISTS = 183
 
@@ -1002,13 +1022,21 @@ def log(message):
         pass
 
 
-def send_stop():
+def _send(cmd, label):
     try:
         with socket.create_connection((HOST, PORT), timeout=1.0) as sock:
-            sock.sendall(b"__STOP__")
-        log("Ctrl+Alt+X sent __STOP__")
+            sock.sendall(cmd)
+        log(f"{label} sent {cmd.decode()}")
     except Exception as exc:
-        log(f"Ctrl+Alt+X failed to send __STOP__: {exc}")
+        log(f"{label} failed to send {cmd.decode()}: {exc}")
+
+
+def send_stop():
+    _send(b"__STOP__", "Ctrl+Alt+X")
+
+
+def send_replay():
+    _send(b"__REPLAY__", "Ctrl+Alt+R")
 
 
 def main():
@@ -1021,16 +1049,22 @@ def main():
     if not user32.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_X):
         log("RegisterHotKey failed. Ctrl+Alt+X may already be registered by another app.")
         return
-    log("Registered Ctrl+Alt+X hotkey.")
+    if not user32.RegisterHotKey(None, HOTKEY_ID_REPLAY, MOD_CONTROL | MOD_ALT, VK_R):
+        log("RegisterHotKey(replay) failed. Ctrl+Alt+R may already be registered by another app.")
+    log("Registered Ctrl+Alt+X (stop) and Ctrl+Alt+R (replay) hotkeys.")
     msg = ctypes.wintypes.MSG()
     try:
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-            if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
-                send_stop()
+            if msg.message == WM_HOTKEY:
+                if msg.wParam == HOTKEY_ID_REPLAY:
+                    send_replay()
+                elif msg.wParam == HOTKEY_ID:
+                    send_stop()
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
     finally:
         user32.UnregisterHotKey(None, HOTKEY_ID)
+        user32.UnregisterHotKey(None, HOTKEY_ID_REPLAY)
         if mutex:
             kernel32.CloseHandle(mutex)
         log("Hotkey daemon stopped.")
@@ -1100,6 +1134,8 @@ Write-Host "============================================"
 Write-Host ""
 Write-Host " Voice:  am_onyx (default)  |  Speed: 1.2x"
 Write-Host " Stop:   Ctrl+Alt+X"
+Write-Host " Replay: Ctrl+Alt+R"
+Write-Host " Preview: say 'quick voices' or 'preview all voices'"
 Write-Host ""
 Write-Host " Toggle TTS on/off:"
 Write-Host "   echo on > `"$claude\tts_enabled.txt`""

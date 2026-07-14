@@ -45,7 +45,9 @@ This is not a generic text-to-speech add-on. It is built for coding agents:
 
 Setup takes just a few clicks and configures everything for you automatically.
 
-**Let your agent do it.** Just paste this into Codex:
+**➡️ Let your AI do it.**
+
+Just paste this into Codex:
 
 ```
 Clone https://github.com/Omnicapable/codex-tts and run the installer for my operating system.
@@ -53,14 +55,25 @@ Clone https://github.com/Omnicapable/codex-tts and run the installer for my oper
 
 It clones and installs everything for you.
 
-**Prefer to do it yourself?** Clone the repo, then:
+---
 
-**Windows:** right-click `Windows/install_codex_tts_Windows.ps1` and choose *Run with PowerShell* (no admin needed).
+**Prefer to do it yourself?**
 
-**macOS:** run in Terminal:
-```bash
+**1. Get the files.** Open **Terminal** (macOS) or **PowerShell** (Windows) and run:
+```
+git clone https://github.com/Omnicapable/codex-tts
+cd codex-tts
+```
+No `git`? On macOS, the first `git` command offers to install Apple's Command Line Tools; accept it. On Windows, install [Git for Windows](https://git-scm.com/download/win), or download the ZIP (green **Code** button → **Download ZIP**), unzip, and `cd` in.
+
+**2. Run the installer for your OS** (from inside that folder):
+
+**macOS:** in Terminal:
+```
 chmod +x Mac/install_codex_tts_Mac.sh && ./Mac/install_codex_tts_Mac.sh
 ```
+
+**Windows:** in the `Windows` folder, right-click `install_codex_tts_Windows.ps1` and choose *Run with PowerShell* (no admin needed).
 
 The installer sets up everything for you automatically (one time, mostly a model download):
 1. Installs Python packages (`kokoro-onnx`, `sounddevice`, `numpy`)
@@ -135,8 +148,10 @@ Type an instruction to Codex, or run the scripts yourself. See also [Shared togg
 | Change voice | `set_voice.py <voice>` |
 | Change speed (0.5 to 2.5) | `set_speed.py --up` / `--down` / `1.5` |
 | Stop current speech | `Ctrl+Alt+X` (Windows) / `Ctrl+Option+X` (macOS) |
+| Replay last answer | `Ctrl+Alt+R` (Windows) / `Ctrl+Option+R` (macOS) |
+| Preview voices | *"quick voices"* or *"preview all voices"* |
 
-Voice and speed scripts live in `%USERPROFILE%\.claude\kokoro\`. The stop hotkey works globally from any window; on macOS, grant Accessibility permission when prompted (System Settings, Privacy and Security, Accessibility).
+Voice and speed scripts live in `%USERPROFILE%\.claude\kokoro\`. The stop and replay hotkeys work globally from any window — no macOS permission prompt needed.
 
 <p align="center">
   <img src="assets/voices.png" alt="The 27 available voices, by accent and gender" width="820">
@@ -213,7 +228,7 @@ echo final > "%USERPROFILE%\.claude\codex_tts_message_mode.txt"
 
 **A reply was skipped.** Codex TTS ignores replies older than 3 minutes and waits out a short cooldown if the voice engine was briefly down. Trigger a new reply and it should speak.
 
-**The stop hotkey does nothing on macOS.** Grant Accessibility permission: System Settings, Privacy and Security, Accessibility.
+**The stop hotkey does nothing on macOS.** Make sure you installed the latest version — the current hotkey needs no permission. Check `~/.claude/tts_hotkey.log`; it should show `Registered Ctrl+Option+X`. If it shows an error instead, reinstall with the latest installer.
 
 **Two voices speak the same reply.** Only one Codex watcher runs at a time (single-instance lock on UDP 59003). If you also run Claude Code or Claude Cowork TTS, they read different sources and will not double-speak Codex.
 

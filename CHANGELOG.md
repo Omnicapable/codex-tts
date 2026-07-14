@@ -1,5 +1,12 @@
 ﻿# Changelog — Codex TTS
 
+## Packaging — 2026-07-14
+- **Mac stop hotkey needs no permission now.** The macOS stop hotkey (Ctrl+Option+X) was rewritten from `pynput` to Carbon `RegisterEventHotKey`, which is not gated by Accessibility / Input Monitoring, so there is no first-use permission prompt. `pynput` was dropped from the Mac dependencies, and the stale "grant Accessibility permission" instructions were removed from the README.
+- **Fixed the Mac hotkey failing to start.** On macOS 11+, `ctypes.util.find_library("Carbon")` returns `None` (system frameworks live in the dyld shared cache), so the daemon crashed before registering. It now loads Carbon by absolute path and logs any startup error to `~/.claude/tts_hotkey.log`.
+- **Replay the last answer.** New global hotkey — Ctrl+Alt+R (Windows) / Ctrl+Option+R (macOS) — re-speaks the last reply. The server stores the last text and handles a new `__REPLAY__` command.
+- **Audio follows your output device.** The server refreshes the audio device before each utterance, so switching output (e.g. connecting AirPods or headphones) is picked up without restarting the server.
+- **Clearer install docs.** The README manual-install steps now include the full `git clone` + `cd` sequence (with a ZIP fallback), and the Controls list documents stop, replay, speed, voice change, and voice previews.
+
 ## Packaging — 2026-06-30
 - **Codex message-mode toggle added; final-only is the default.** Codex rollout logs contain both interim `agent_message` commentary/status updates and final replies. The watcher now filters by the rollout `phase` field and defaults to speaking only `phase: "final_answer"` messages, matching the quieter Claude TTS behavior. Users can opt back into hearing all assistant updates by writing `all` to `~/.claude/codex_tts_message_mode.txt`, or return to final-only by writing `final`. Windows helper scripts are included in the package as `Windows\set_codex_tts_all_messages.bat` and `Windows\set_codex_tts_final_only.bat`.
 - **Voice alias coverage expanded.** Preview voice aliases now cover common misspellings and phonetic variants across the bundled Kokoro voices, including `onix`, `erik`, `micheal`, `skye`, `sara`, `lilly`, `jorge`, `louis`, and Echo variants such as `eco`/`eko`.

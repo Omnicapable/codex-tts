@@ -95,6 +95,17 @@ sd.wait()
 
 _speak_lock = threading.Semaphore(1)
 _stop_event  = threading.Event()
+_last_text  = ""      # last text spoken, for __REPLAY__
+_last_voice = None
+
+def _refresh_audio_device():
+    # sounddevice/PortAudio caches the output device at startup and does NOT
+    # follow when the user switches output (AirPods/headphones/Bluetooth).
+    # Re-initialising PortAudio makes the next playback use the current default.
+    try:
+        sd._terminate(); sd._initialize()
+    except Exception:
+        pass
 
 def clean_text(text):
     text = re.sub(r'(?m)(\|[^\n]+\|\n?)+', ' attached table. ', text)
@@ -159,6 +170,7 @@ def speak(text, voice_override=None):
             except Exception: pass
         wav_queue.put(None)
     threading.Thread(target=producer, daemon=True).start()
+    _refresh_audio_device()
     while True:
         item = wav_queue.get()
         if item is None or _stop_event.is_set():
@@ -173,6 +185,7 @@ def speak(text, voice_override=None):
             sd.stop(); break
 
 def handle_client(conn):
+    global _last_text, _last_voice
     with conn:
         data = b""
         while True:
@@ -198,12 +211,17 @@ def handle_client(conn):
             try: conn.sendall(VOICE.encode("utf-8")); conn.shutdown(socket.SHUT_WR)
             except Exception: pass
             return
+        if text == "__REPLAY__":
+            if _last_text:
+                with _speak_lock: speak(_last_text, voice_override=_last_voice)
+            return
         if text:
             req_voice = None
             if text.startswith("VOICE=") and "|" in text:
                 prefix, text = text.split("|", 1)
                 req_voice = prefix[6:].strip()
             if text:
+                _last_text, _last_voice = text, req_voice
                 with _speak_lock: speak(text, voice_override=req_voice)
 
 def run_server():
@@ -997,6 +1015,7 @@ import ctypes.util
 import os
 import socket
 import time
+import traceback
 
 HOST = "127.0.0.1"
 PORT = 59001
@@ -1006,8 +1025,13 @@ LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "tts
 CONTROL_KEY = 0x1000
 OPTION_KEY  = 0x0800
 KEY_X       = 0x07                 # kVK_ANSI_X
+KEY_R       = 0x0F                 # kVK_ANSI_R
 EVENT_CLASS_KEYBOARD = 0x6B657962  # 'keyb'
 EVENT_HOTKEY_PRESSED = 5           # kEventHotKeyPressed
+PARAM_DIRECT_OBJECT  = 0x2D2D2D2D  # '----' kEventParamDirectObject
+TYPE_HOTKEY_ID       = 0x686B6964  # 'hkid' typeEventHotKeyID
+STOP_ID   = 1
+REPLAY_ID = 2
 kProcessTransformToUIElementApplication = 4
 
 
@@ -1021,13 +1045,21 @@ def log(message):
         pass
 
 
-def send_stop():
+def _send(cmd, label):
     try:
         with socket.create_connection((HOST, PORT), timeout=1.0) as sock:
-            sock.sendall(b"__STOP__")
-        log("Ctrl+Option+X sent __STOP__")
+            sock.sendall(cmd)
+        log(f"{label} sent {cmd.decode()}")
     except Exception as exc:
-        log(f"Ctrl+Option+X failed to send __STOP__: {exc}")
+        log(f"{label} failed to send {cmd.decode()}: {exc}")
+
+
+def send_stop():
+    _send(b"__STOP__", "Ctrl+Option+X")
+
+
+def send_replay():
+    _send(b"__REPLAY__", "Ctrl+Option+R")
 
 
 class EventTypeSpec(ctypes.Structure):
@@ -1042,25 +1074,23 @@ class ProcessSerialNumber(ctypes.Structure):
     _fields_ = [("highLongOfPSN", ctypes.c_uint32), ("lowLongOfPSN", ctypes.c_uint32)]
 
 
-carbon = ctypes.CDLL(ctypes.util.find_library("Carbon"))
-
-carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
-carbon.GetApplicationEventTarget.argtypes = []
-carbon.InstallEventHandler.restype = ctypes.c_int32
-carbon.InstallEventHandler.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong,
-                                       ctypes.POINTER(EventTypeSpec), ctypes.c_void_p, ctypes.c_void_p]
-carbon.RegisterEventHotKey.restype = ctypes.c_int32
-carbon.RegisterEventHotKey.argtypes = [ctypes.c_uint32, ctypes.c_uint32, EventHotKeyID,
-                                       ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
-carbon.RunApplicationEventLoop.restype = None
-carbon.RunApplicationEventLoop.argtypes = []
+carbon = None  # set in main()
 
 # OSStatus handler(EventHandlerCallRef, EventRef, void *userData)
 HANDLER = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 
 
-def _on_hotkey(_call_ref, _event, _user_data):
-    send_stop()
+def _on_hotkey(_call_ref, event, _user_data):
+    hk = EventHotKeyID()
+    try:
+        carbon.GetEventParameter(event, PARAM_DIRECT_OBJECT, TYPE_HOTKEY_ID, None,
+                                 ctypes.sizeof(hk), None, ctypes.byref(hk))
+    except Exception:
+        pass
+    if hk.id == REPLAY_ID:
+        send_replay()
+    else:
+        send_stop()
     return 0
 
 
@@ -1068,28 +1098,74 @@ def _on_hotkey(_call_ref, _event, _user_data):
 _handler_ref = HANDLER(_on_hotkey)
 
 
+def _load_carbon():
+    # ctypes.util.find_library("Carbon") returns None on macOS 11+ because system
+    # frameworks live in the dyld shared cache, not on disk. Load by absolute
+    # path first; dyld still resolves it from the cache.
+    for path in ("/System/Library/Frameworks/Carbon.framework/Carbon",
+                 "/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon",
+                 ctypes.util.find_library("Carbon")):
+        if not path:
+            continue
+        try:
+            return ctypes.CDLL(path)
+        except OSError:
+            continue
+    return None
+
+
 def main():
-    # Detach from the Dock but stay able to receive events.
-    try:
-        psn = ProcessSerialNumber(0, 2)  # {0, kCurrentProcess}
-        carbon.TransformProcessType(ctypes.byref(psn),
-                                    kProcessTransformToUIElementApplication)
-    except Exception:
-        pass
-
-    target = carbon.GetApplicationEventTarget()
-    spec = EventTypeSpec(EVENT_CLASS_KEYBOARD, EVENT_HOTKEY_PRESSED)
-    carbon.InstallEventHandler(target, _handler_ref, 1, ctypes.byref(spec), None, None)
-
-    hotkey_ref = ctypes.c_void_p()
-    status = carbon.RegisterEventHotKey(KEY_X, CONTROL_KEY | OPTION_KEY,
-                                        EventHotKeyID(0x54545353, 1), target, 0,
-                                        ctypes.byref(hotkey_ref))
-    if status != 0:
-        log(f"RegisterEventHotKey FAILED (status {status}); Ctrl+Option+X may be taken.")
+    global carbon
+    carbon = _load_carbon()
+    if carbon is None:
+        log("ERROR: could not load the Carbon framework; hotkey disabled.")
         return
-    log("Registered Ctrl+Option+X (Carbon, no permission needed).")
-    carbon.RunApplicationEventLoop()
+    try:
+        carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
+        carbon.GetApplicationEventTarget.argtypes = []
+        carbon.GetEventParameter.restype = ctypes.c_int32
+        carbon.GetEventParameter.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                             ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p]
+        carbon.InstallEventHandler.restype = ctypes.c_int32
+        carbon.InstallEventHandler.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong,
+                                               ctypes.POINTER(EventTypeSpec), ctypes.c_void_p, ctypes.c_void_p]
+        carbon.RegisterEventHotKey.restype = ctypes.c_int32
+        carbon.RegisterEventHotKey.argtypes = [ctypes.c_uint32, ctypes.c_uint32, EventHotKeyID,
+                                               ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
+        carbon.RunApplicationEventLoop.restype = None
+        carbon.RunApplicationEventLoop.argtypes = []
+
+        # Give the faceless launchd process a WindowServer connection so it can
+        # receive the hotkey, without showing a Dock icon.
+        try:
+            psn = ProcessSerialNumber(0, 2)  # {0, kCurrentProcess}
+            carbon.TransformProcessType(ctypes.byref(psn),
+                                        kProcessTransformToUIElementApplication)
+        except Exception as exc:
+            log(f"TransformProcessType skipped: {exc}")
+
+        target = carbon.GetApplicationEventTarget()
+        spec = EventTypeSpec(EVENT_CLASS_KEYBOARD, EVENT_HOTKEY_PRESSED)
+        carbon.InstallEventHandler(target, _handler_ref, 1, ctypes.byref(spec), None, None)
+
+        stop_ref = ctypes.c_void_p()
+        status = carbon.RegisterEventHotKey(KEY_X, CONTROL_KEY | OPTION_KEY,
+                                            EventHotKeyID(0x54545353, STOP_ID), target, 0,
+                                            ctypes.byref(stop_ref))
+        if status != 0:
+            log(f"RegisterEventHotKey(stop) FAILED (status {status}); Ctrl+Option+X may be taken.")
+            return
+        replay_ref = ctypes.c_void_p()
+        status_r = carbon.RegisterEventHotKey(KEY_R, CONTROL_KEY | OPTION_KEY,
+                                              EventHotKeyID(0x54545353, REPLAY_ID), target, 0,
+                                              ctypes.byref(replay_ref))
+        if status_r != 0:
+            log(f"RegisterEventHotKey(replay) FAILED (status {status_r}); Ctrl+Option+R may be taken.")
+        log("Registered Ctrl+Option+X (stop) and Ctrl+Option+R (replay) (Carbon, no permission needed).")
+        carbon.RunApplicationEventLoop()
+    except Exception as exc:
+        log("ERROR in hotkey daemon: " + repr(exc))
+        log(traceback.format_exc())
 
 
 if __name__ == "__main__":
@@ -1120,7 +1196,7 @@ cat > "$HOTKEY_PLIST_PATH" << PLISTEOF
 PLISTEOF
 launchctl bootout "gui/$(id -u)/$HOTKEY_PLIST_LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$HOTKEY_PLIST_PATH" 2>/dev/null || true
-echo "      Ctrl+Option+X stop hotkey installed (no permission prompt needed)."
+echo "      Ctrl+Option+X (stop) and Ctrl+Option+R (replay) hotkeys installed (no permission prompt needed)."
 
 cat > "$WATCHER_PLIST_PATH" << PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1165,6 +1241,10 @@ echo " Version: v$VERSION  |  Voice: am_onyx  |  Speed: 1.2x"
 echo ""
 echo " The Codex watcher monitors ~/.codex/sessions and speaks"
 echo " assistant messages automatically as they complete."
+echo ""
+echo " Stop speech:     press Ctrl+Option+X"
+echo " Replay answer:   press Ctrl+Option+R"
+echo " Preview voices:  say 'quick voices' or 'preview all voices'"
 echo ""
 echo " Toggle TTS:      echo on > ~/.claude/tts_enabled.txt"
 echo "                  echo off > ~/.claude/tts_enabled.txt"
