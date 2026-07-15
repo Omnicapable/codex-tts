@@ -43,7 +43,12 @@ echo "      Found: $($PYTHON --version) at $PYTHON"
 
 # --- 2. Install Python packages ------------------------------------------------
 echo "[2/7] Installing Python packages..."
-$PYTHON -m pip install kokoro-onnx sounddevice numpy --quiet
+if ! $PYTHON -m pip install kokoro-onnx sounddevice numpy --quiet 2>/dev/null; then
+    # Homebrew / system Python marks itself "externally managed" (PEP 668) and
+    # refuses a global pip install. Retry the way pip's own error recommends.
+    echo "      System Python is externally managed (PEP 668); retrying with --break-system-packages..."
+    $PYTHON -m pip install kokoro-onnx sounddevice numpy --quiet --break-system-packages
+fi
 echo "      Done."
 
 # --- 3. Create folders ---------------------------------------------------------

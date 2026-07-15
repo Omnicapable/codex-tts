@@ -50,7 +50,8 @@ Setup takes just a few clicks and configures everything for you automatically.
 Just paste this into Codex:
 
 ```
-Clone https://github.com/Omnicapable/codex-tts and run the installer for my operating system.
+Clone https://github.com/Omnicapable/codex-tts and run the installer for my OS.
+Run it to completion and show me the final summary. Tell me first if git or Python 3.9+ is missing.
 ```
 
 It clones and installs everything for you.
