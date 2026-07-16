@@ -1,6 +1,6 @@
 ﻿# Changelog — Codex TTS
 
-## Packaging — 2026-07-14
+## v1.7
 - **Mac stop hotkey needs no permission now.** The macOS stop hotkey (Ctrl+Option+X) was rewritten from `pynput` to Carbon `RegisterEventHotKey`, which is not gated by Accessibility / Input Monitoring, so there is no first-use permission prompt. `pynput` was dropped from the Mac dependencies, and the stale "grant Accessibility permission" instructions were removed from the README.
 - **Fixed the Mac hotkey failing to start.** On macOS 11+, `ctypes.util.find_library("Carbon")` returns `None` (system frameworks live in the dyld shared cache), so the daemon crashed before registering. It now loads Carbon by absolute path and logs any startup error to `~/.claude/tts_hotkey.log`.
 - **Replay the last answer.** New global hotkey — Ctrl+Alt+R (Windows) / Ctrl+Option+R (macOS) — re-speaks the last reply. The server stores the last text and handles a new `__REPLAY__` command.
@@ -9,8 +9,9 @@
 - **Audio-device follow made non-fragile.** The output-device refresh no longer tears down and re-initialises PortAudio before every utterance (which caused macOS `PaMacCore -50` errors); it only re-scans after an idle gap, so it still follows AirPods/headphone switches without thrashing the audio backend mid-burst.
 - **Voice preview: fixed samples playing in the wrong voice.** The preview announced each voice by mutating a shared global (`__VOICE:name__`) and sent the sample as a separate message — but synthesis runs on a background thread, so a fast preview could synthesise a sample *after* the next voice-switch had overwritten the global, playing it in the wrong voice (mismatched label/gender). Each sample now carries its own voice atomically via the per-request `VOICE=name|text` prefix, correct regardless of timing.
 - **Install no longer blocked by Homebrew Python (PEP 668).** On macOS with Homebrew's Python, a global `pip install` is refused (externally-managed environment), which aborted setup at the package step. The installer now retries with `--break-system-packages` when it hits this, so it completes.
+- **Money and large numbers now read correctly.** The `$` cleaner only handled a single digit and the thousands-comma strip only removed one comma per number, so `$50` was spoken "5 dollars zero" and `1,000,000` became "one thousand, zero zero zero". Both now parse the whole value: `$50` → "50 dollars", `$3.50` → "3 dollars and 50 cents", `1,000,000` → "1000000", `$1,234.56` → "1234 dollars and 56 cents". Plain decimals (`3.14`) and percentages were already correct and are unaffected.
 
-## Packaging — 2026-06-30
+## v1.6
 - **Codex message-mode toggle added; final-only is the default.** Codex rollout logs contain both interim `agent_message` commentary/status updates and final replies. The watcher now filters by the rollout `phase` field and defaults to speaking only `phase: "final_answer"` messages, matching the quieter Claude TTS behavior. Users can opt back into hearing all assistant updates by writing `all` to `~/.claude/codex_tts_message_mode.txt`, or return to final-only by writing `final`. Windows helper scripts are included in the package as `Windows\set_codex_tts_all_messages.bat` and `Windows\set_codex_tts_final_only.bat`.
 - **Voice alias coverage expanded.** Preview voice aliases now cover common misspellings and phonetic variants across the bundled Kokoro voices, including `onix`, `erik`, `micheal`, `skye`, `sara`, `lilly`, `jorge`, `louis`, and Echo variants such as `eco`/`eko`.
 - **Voice alias tolerance improved.** Echo now accepts common misspellings/phonetic aliases: `echo`, `eco`, `eko`, `ecko`, `ekko`, and `echoo` all resolve to `am_echo`.
@@ -33,7 +34,7 @@
   installer comments/echoes. Restored the correct characters (Windows BOM preserved); both installers
   re-verified — PowerShell/bash parse clean and the embedded server compiles.
 
-## v1.5 — 2026-06-30
+## v1.5
 - **Watcher-only** — Stop hook (`codex_tts_hook.ps1` / `.sh`) removed from the setup.
   The hook fired at end-of-turn with `last_assistant_message`, but the watcher already
   reads the same text from the rollout JSONL file, causing the final reply to be spoken
@@ -41,14 +42,14 @@
   `agent_message` event as it lands); the hook solved a near-theoretical miss scenario
   while introducing a reliable duplication problem. This aligns Codex TTS with the
   Cowork TTS design, which has always been watcher-only.
-- **Installers updated** — Windows installer bumped to v1.3, Mac installer to v1.1 (later v1.4 / v1.2 — see Packaging, 2026-06-30).
+- **Installers updated** — Windows installer bumped to v1.3, Mac installer to v1.1 (later v1.4 / v1.2 — see v1.6).
   Hook writing and `settings.json` registration steps removed. Step count reduced from
   9 → 8 (Windows) and 9 → 7 (Mac).
 - **`settings.json` migration** — `remove_codex_hook.ps1` provided in the live setup
   folder for users upgrading from v1.4. Removes the `codex_tts_hook` entry from
   `~/.claude/settings.json`. Run once after upgrading.
 
-## Audit — 2026-06-29
+## Audit
 - **Age-filter cross-check (no code change).** A field-name bug was found and fixed in the Claude
   Cowork TTS watcher, where the age filter read a non-existent `ts` field instead of the ISO-8601
   `timestamp` field and so never ran. The Codex watcher was audited against this: it already reads
@@ -56,7 +57,7 @@
   v1.3). Confirmed against a real `rollout-*.jsonl` file — Codex records use `timestamp`
   (e.g. `"2026-06-04T15:55:45.076Z"`). The 180 s stale-content guard works as intended; no change required.
 
-## v1.4 — 2026-06-29
+## v1.4
 - **Per-watcher voice** — `WATCHER_VOICE = None` constant added to `codex_tts_watcher.py`.
   Set it to any Kokoro voice name (e.g. `"am_adam"`) to give Codex TTS its own distinct voice,
   independent of the Cowork or Claude Code TTS voice. Uses the `VOICE=name|text` per-request
@@ -64,7 +65,7 @@
   there are no race conditions when multiple watchers are active simultaneously.
 - **Robust Python launcher (Windows)** — `install_codex_tts_Windows.ps1` (now v1.2) launches Python through the Windows `py -3` launcher instead of bare `python` for the package install and every Kokoro-server / watcher launch (auto-start VBS, scheduled-task watchdog, and immediate launch). `py -3` is PATH-order independent, so the server and watcher always start under Python 3.x on machines with multiple Python installs. **Mac unaffected** — already resolves `python3` once.
 
-## v1.3 — 2026-06-29
+## v1.3
 - **Faster poll**: `POLL` reduced from `0.5 s` to `0.1 s` — 5× faster response to new messages,
   matching the Claude Cowork TTS watcher.
 - **Message age filter**: `MESSAGE_MAX_AGE_SECONDS = 180` — any message whose timestamp is older
@@ -78,17 +79,17 @@
 - **Windows installer**: bumped to `v1.1` with updated embedded watcher (v1.3) and BOM fix
   (UTF-8 with BOM to ensure correct PowerShell 5.1 parsing).
 
-## v1.2 — 2026-06-28
+## v1.2
 - **Single-instance lock**: on startup the watcher binds a UDP socket to
   `127.0.0.1:59003`. Any duplicate process (watchdog + restart race, etc.) exits
   immediately. The OS releases the binding on process exit — no stale lock files.
   Port 59003 is used (not 59002) so this watcher coexists with Claude Cowork TTS.
 
-## v1.1 — 2026-06-28
+## v1.1
 - **Log rotation**: `codex_tts_watcher_log.txt` is capped at 1 MB. On overflow the
   current log is renamed to `.prev` and a fresh file starts.
 
-## v1.0 — 2026-06-27
+## v1.0
 - Initial release. Polls `~/.codex/sessions/rollout-*.jsonl` for `agent_message`
   events. Existing files start at EOF on watcher startup (no replay). New rollout
   files discovered after startup are read from offset 0. Shares Kokoro server on
