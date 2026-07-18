@@ -37,6 +37,8 @@ This is not a generic text-to-speech add-on. It is built for coding agents:
 
 - **Yours to tune.** 27 voices and adjustable speed, with a per-tool voice so parallel agents sound distinct.
 
+- **Smooth, natural delivery.** Speech starts in about a second and streams without mid-reply gaps, and money, percentages, versions, domains, and abbreviations are read the way a person would say them.
+
 - **More accessible.** A comfortable way to work with AI for people with dyslexia, low vision, or screen fatigue.
 
 ---

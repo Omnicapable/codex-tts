@@ -79,12 +79,25 @@ else
 cat > "$KOKORO_DIR/tts_server.py" << 'PYEOF'
 # -*- coding: utf-8 -*-
 """
-tts_server.py v2.3 - Persistent Kokoro TTS server.
+tts_server.py v2.5 - Persistent Kokoro TTS server.
 Loads the model once, listens on localhost:59001 for text to speak.
 Pipelined: synthesizes sentence-by-sentence so first sentence plays immediately.
-Supports: stop, replay, speed change, voice change, voice memory, pronunciation
-          cleanup, per-request voice prefix (VOICE=name|text), output-device
-          follow, auto-restart watchdog.
+Supports: stop, replay, speed change, voice change, voice & speed memory,
+          pronunciation cleanup, per-request voice prefix (VOICE=name|text),
+          output-device follow, auto-restart watchdog.
+v2.5: Speed memory - the chosen speed is saved to speed.txt beside the
+      server (mirroring voice memory) and reloaded on start.
+      Speech polish - abbreviations (e.g., i.e., vs., etc., approx.) now
+      actually expand (their old patterns ended in a word boundary that cannot
+      match before a space, so they never fired). Money handles one-decimal
+      amounts ($3.5), sub-dollar amounts ($0.99 reads "99 cents") and scale
+      words ($1.5 million reads "1 point 5 million dollars"). Emoji stripping
+      covers the stars/arrows/symbols blocks (U+2190-21FF, U+2B00-2BFF).
+v2.4: Gapless playback - long sentences now split at clause breaks into
+      chunks of at most ~120 chars (min ~40), so synthesis (about 4x realtime
+      on CPU) always finishes the next chunk before the current one ends.
+      Short opening chunks keep time-to-first-audio low. Chunking only; the
+      audio path, queue, stop/replay semantics are untouched.
 v2.3: Cents fix - the ' point ' rule now runs AFTER the money rule, so "$3.50"
       reads "3 dollars and 50 cents" again rather than "3 dollars point 50".
       Header corrected to match shipped behaviour. Consolidates the replay
@@ -102,6 +115,7 @@ import sounddevice as sd
 
 HOST, PORT = "127.0.0.1", 59001
 VOICE, SPEED, LANG, MAX_CHARS = "am_onyx", 1.2, "en-us", 5000
+CHUNK_MAX, CHUNK_MIN = 120, 40
 VOICE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice.txt")
 def _load_voice():
     try:
@@ -119,6 +133,20 @@ def _save_voice(v):
     except Exception:
         pass
 VOICE = _load_voice()
+SPEED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "speed.txt")
+def _load_speed():
+    try:
+        with open(SPEED_FILE, "r", encoding="utf-8") as f:
+            return float(f.read().strip())
+    except Exception:
+        return 1.2
+def _save_speed(s):
+    try:
+        with open(SPEED_FILE, "w", encoding="utf-8") as f:
+            f.write(str(s))
+    except Exception:
+        pass
+SPEED = _load_speed()
 
 base = os.path.dirname(os.path.abspath(__file__))
 from kokoro_onnx import Kokoro
@@ -149,6 +177,15 @@ def _refresh_audio_device():
         except Exception:
             pass
 
+def _money(m):
+    d, c = m.group(1), m.group(2)
+    if c is None:
+        return d + ' dollars'
+    if len(c) > 2:
+        return d + ' point ' + c + ' dollars'
+    cents = c + '0' if len(c) == 1 else c
+    return (cents + ' cents') if d == '0' else (d + ' dollars and ' + cents + ' cents')
+
 def clean_text(text):
     # --- Tables --- replace markdown tables with a brief label
     text = re.sub(r'(?m)(\|[^\n]+\|\n?)+', ' attached table. ', text)
@@ -172,18 +209,20 @@ def clean_text(text):
     text = re.sub(r'[|\\]', '', text)
     text = re.sub(r'[•·●◦]', '', text)
     # --- Emojis ---
-    text = re.sub(r'[\U0001F000-\U0001FFFF\U00002600-\U000027BF\U0000FE00-\U0000FE0F]+', '', text)
+    text = re.sub(r'[\U0001F000-\U0001FFFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U00002190-\U000021FF\U0000FE00-\U0000FE0F]+', '', text)
     # --- URLs ---
     text = re.sub(r'https?://\S+', 'link', text)
     # --- Abbreviations ---
-    text = re.sub(r'\be\.g\.\b', 'for example', text)
-    text = re.sub(r'\bi\.e\.\b', 'that is', text)
-    text = re.sub(r'\bvs\.\b', 'versus', text)
-    text = re.sub(r'\betc\.\b', 'etcetera', text)
-    text = re.sub(r'\bapprox\.\b', 'approximately', text)
+    text = re.sub(r'\be\.g\.', 'for example', text)
+    text = re.sub(r'\bi\.e\.', 'that is', text)
+    text = re.sub(r'\bvs\.', 'versus', text)
+    text = re.sub(r'\betc\.', 'etcetera', text)
+    text = re.sub(r'\bapprox\.', 'approximately', text)
     # --- Numbers ---
     text = re.sub(r'(?<=\d),(?=\d{3}(?:\D|$))', '', text)
-    text = re.sub(r'\$(\d+)(?:\.(\d{2})(?!\d))?', lambda m: (m.group(1)+' dollars and '+m.group(2)+' cents') if m.group(2) else (m.group(1)+' dollars'), text)
+    text = re.sub(r'\$(\d+(?:\.\d+)?)\s*(million|billion|trillion|thousand)\b', r'\1 \2 dollars', text, flags=re.IGNORECASE)
+    text = re.sub(r'\$(\d+(?:\.\d+)?)([kKmMbB])\b', lambda m: m.group(1) + ' ' + {'k': 'thousand', 'm': 'million', 'b': 'billion'}[m.group(2).lower()] + ' dollars', text)
+    text = re.sub(r'\$(\d+)(?:\.(\d+))?', _money, text)
     text = re.sub(r'(\d)%', r'\1 percent', text)
     text = re.sub(r'(\d+)x\b', r'\1 times', text)
     # --- Versions & bare domains ---
@@ -197,15 +236,28 @@ def clean_text(text):
     return text.strip()
 
 def split_sentences(text):
-    parts = re.split(r'(?<=[.!?])\s+', text)
-    result = []
-    for s in parts:
+    # Chunk sizing is what keeps playback gapless: a chunk of at most CHUNK_MAX
+    # chars synthesizes faster than the CHUNK_MIN chars of audio before it play,
+    # so the producer always stays ahead. Long sentences break at clause
+    # punctuation; fragments below CHUNK_MIN merge with a neighbour.
+    pieces = []
+    for s in re.split(r'(?<=[.!?])\s+', text):
         s = s.strip()
-        if not s: continue
-        if result and len(result[-1]) < 40:
-            result[-1] += ' ' + s
+        while len(s) > CHUNK_MAX:
+            w = s[:CHUNK_MAX]
+            cut = max(w.rfind(','), w.rfind(';'), w.rfind(':'))
+            if cut < CHUNK_MIN: cut = w.rfind(' ')
+            if cut < CHUNK_MIN: cut = CHUNK_MAX - 1
+            pieces.append(s[:cut + 1].strip())
+            s = s[cut + 1:].strip()
+        if s: pieces.append(s)
+    result = []
+    for p in pieces:
+        if (result and (len(result[-1]) < CHUNK_MIN or len(p) < CHUNK_MIN)
+                and len(result[-1]) + len(p) < CHUNK_MAX + CHUNK_MIN):
+            result[-1] += ' ' + p
         else:
-            result.append(s)
+            result.append(p)
     return result if result else [text]
 
 def synthesize(sentence, voice_override=None):
@@ -260,7 +312,7 @@ def handle_client(conn):
 
         if text.startswith("__SPEED:") and text.endswith("__"):
             global SPEED
-            try: SPEED = float(text[8:-2].strip())
+            try: SPEED = float(text[8:-2].strip()); _save_speed(SPEED)
             except ValueError: pass
             return
 
