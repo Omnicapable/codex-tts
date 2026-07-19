@@ -1,5 +1,15 @@
 ﻿# Changelog — Codex TTS
 
+## Shared server v2.6
+
+**Smoother playback under load**
+
+- **No more gaps between sentences when the machine is busy.** The server now raises
+  its own process priority at startup (Windows: `SetPriorityClass` ABOVE_NORMAL;
+  Mac/Linux: best-effort `os.nice`), so the next sentence is always synthesized before
+  the current one finishes playing, even while the CPU is loaded by the agent or a
+  browser. Previously that contention produced audible pauses between sentences.
+
 ## Shared server v2.5
 
 **Improved speech**

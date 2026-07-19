@@ -66,12 +66,16 @@ Write-Host "[5/8] Writing TTS server..."
 Set-Content -Path "$kokoro\tts_server.py" -Encoding UTF8 -Value @'
 # -*- coding: utf-8 -*-
 """
-tts_server.py v2.5 - Persistent Kokoro TTS server.
+tts_server.py v2.6 - Persistent Kokoro TTS server.
 Loads the model once, listens on localhost:59001 for text to speak.
 Pipelined: synthesizes sentence-by-sentence so first sentence plays immediately.
 Supports: stop, replay, speed change, voice change, voice & speed memory,
           pronunciation cleanup, per-request voice prefix (VOICE=name|text),
           output-device follow, auto-restart watchdog.
+v2.6: Above-normal process priority - raised at startup (Windows:
+      SetPriorityClass ABOVE_NORMAL; Mac/Linux: best-effort os.nice) so
+      chunk synthesis keeps outpacing playback while the CPU is busy.
+      Fixes audible gaps between sentences under load.
 v2.5: Speed memory - the chosen speed is saved to speed.txt beside the
       server (mirroring voice memory) and reloaded on start.
       Speech polish - abbreviations (e.g., i.e., vs., etc., approx.) now
@@ -99,6 +103,21 @@ v2.0: Initial pipelined release with sentence splitting and speed/voice controls
 import socket, threading, queue, os, re, time
 import numpy as np
 import sounddevice as sd
+
+# v2.6: Raise our process priority so chunk synthesis keeps outpacing playback
+# while the CPU is busy (agent streaming, browser). Best-effort: on Mac/Linux
+# os.nice needs privileges and silently stays at normal priority without them.
+try:
+    if os.name == "nt":
+        import ctypes
+        _k32 = ctypes.windll.kernel32
+        _k32.GetCurrentProcess.restype = ctypes.c_void_p
+        _k32.SetPriorityClass.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+        _k32.SetPriorityClass(_k32.GetCurrentProcess(), 0x00008000)  # ABOVE_NORMAL
+    else:
+        os.nice(-5)
+except Exception:
+    pass
 
 HOST, PORT = "127.0.0.1", 59001
 VOICE, SPEED, LANG, MAX_CHARS = "am_onyx", 1.2, "en-us", 5000
