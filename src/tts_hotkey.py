@@ -1,25 +1,29 @@
 # -*- coding: utf-8 -*-
 """
 Safe global TTS hotkey daemon (Windows).
-Registers Ctrl+Alt+X (RegisterHotKey) and sends Kokoro's shared __STOP__ command
-to 127.0.0.1:59001. Uses RegisterHotKey, NOT a low-level keyboard hook, so normal
-typing is never intercepted. A named mutex enforces a single instance, so installing
-more than one TTS product (each launches this daemon) is harmless.
+Registers Ctrl+Alt+X (stop), Ctrl+Alt+R (replay), and Ctrl+Alt+Space
+(open panel) with RegisterHotKey. This is NOT a low-level keyboard hook, so
+normal typing is never intercepted and no extra permission prompt is needed.
+A named mutex enforces a single instance, so installing more than one TTS
+product is harmless.
 """
 import ctypes
 import ctypes.wintypes
 import os
 import socket
+import subprocess
 import time
 
 HOST = "127.0.0.1"
 PORT = 59001
-HOTKEY_ID = 0x545453          # stop   (Ctrl+Alt+X)
-HOTKEY_ID_REPLAY = 0x545454   # replay (Ctrl+Alt+R)
+HOTKEY_ID = 0x545453          # stop       (Ctrl+Alt+X)
+HOTKEY_ID_REPLAY = 0x545454   # replay     (Ctrl+Alt+R)
+HOTKEY_ID_PANEL = 0x545455    # open panel (Ctrl+Alt+Space)
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 VK_X = 0x58
 VK_R = 0x52
+VK_SPACE = 0x20
 WM_HOTKEY = 0x0312
 ERROR_ALREADY_EXISTS = 183
 
@@ -53,6 +57,28 @@ def send_replay():
     _send(b"__REPLAY__", "Ctrl+Alt+R")
 
 
+def open_panel():
+    home = os.path.expanduser("~")
+    launcher = os.path.join(home, ".claude", "Open-Panel.vbs")
+    panel = os.path.join(home, ".claude", "Open-Panel.bat")
+    target = launcher if os.path.isfile(launcher) else panel
+    if not os.path.isfile(target):
+        log(f"Ctrl+Alt+Space failed: {target} not found")
+        return
+    try:
+        if target.lower().endswith(".vbs"):
+            subprocess.Popen(["wscript.exe", target],
+                             cwd=os.path.dirname(target),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", target],
+                             cwd=os.path.dirname(target),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log("Ctrl+Alt+Space opened Omnicapable Voice panel")
+    except Exception as exc:
+        log(f"Ctrl+Alt+Space failed to open panel: {exc}")
+
+
 def main():
     kernel32 = ctypes.windll.kernel32
     user32 = ctypes.windll.user32
@@ -60,25 +86,35 @@ def main():
     if mutex and kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
         log("Hotkey daemon already running; exiting duplicate.")
         return
+    registered = []
     if not user32.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_X):
         log("RegisterHotKey failed. Ctrl+Alt+X may already be registered by another app.")
         return
-    if not user32.RegisterHotKey(None, HOTKEY_ID_REPLAY, MOD_CONTROL | MOD_ALT, VK_R):
+    registered.append(HOTKEY_ID)
+    if user32.RegisterHotKey(None, HOTKEY_ID_REPLAY, MOD_CONTROL | MOD_ALT, VK_R):
+        registered.append(HOTKEY_ID_REPLAY)
+    else:
         log("RegisterHotKey(replay) failed. Ctrl+Alt+R may already be registered by another app.")
-    log("Registered Ctrl+Alt+X (stop) and Ctrl+Alt+R (replay) hotkeys.")
+    if user32.RegisterHotKey(None, HOTKEY_ID_PANEL, MOD_CONTROL | MOD_ALT, VK_SPACE):
+        registered.append(HOTKEY_ID_PANEL)
+    else:
+        log("RegisterHotKey(open panel) failed. Ctrl+Alt+Space may already be registered by another app.")
+    log("Registered Ctrl+Alt+X (stop), Ctrl+Alt+R (replay), and Ctrl+Alt+Space (open panel) hotkeys.")
     msg = ctypes.wintypes.MSG()
     try:
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
             if msg.message == WM_HOTKEY:
-                if msg.wParam == HOTKEY_ID_REPLAY:
+                if msg.wParam == HOTKEY_ID_PANEL:
+                    open_panel()
+                elif msg.wParam == HOTKEY_ID_REPLAY:
                     send_replay()
                 elif msg.wParam == HOTKEY_ID:
                     send_stop()
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
     finally:
-        user32.UnregisterHotKey(None, HOTKEY_ID)
-        user32.UnregisterHotKey(None, HOTKEY_ID_REPLAY)
+        for hotkey_id in registered:
+            user32.UnregisterHotKey(None, hotkey_id)
         if mutex:
             kernel32.CloseHandle(mutex)
         log("Hotkey daemon stopped.")

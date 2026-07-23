@@ -79,7 +79,7 @@ chmod +x Mac/install_codex_tts_Mac.sh && ./Mac/install_codex_tts_Mac.sh
 **Windows:** in the `Windows` folder, right-click `install_codex_tts_Windows.ps1` and choose *Run with PowerShell* (no admin needed).
 
 The installer sets up everything for you automatically (one time, mostly a model download):
-1. Installs Python packages (`kokoro-onnx`, `sounddevice`, `numpy`)
+1. Installs the required Python packages
 2. Downloads the Kokoro model (~336 MB, one time, skipped if already present)
 3. Writes the watcher script
 4. Sets up auto-start (Windows: scheduled task watchdog; macOS: launchd)

@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 Safe global TTS hotkey daemon (macOS).
-Registers Ctrl+Option+X via Carbon's RegisterEventHotKey and sends Kokoro's
-shared __STOP__ command to 127.0.0.1:59001. RegisterEventHotKey is NOT gated by
-Accessibility or Input Monitoring, so NO permission prompt is ever shown —
-unlike a pynput / CGEventTap approach.
+Registers Ctrl+Option+X (stop), Ctrl+Option+R (replay), and Ctrl+Option+Space
+(open panel) via Carbon's RegisterEventHotKey. RegisterEventHotKey is NOT gated
+by Accessibility or Input Monitoring, so no extra permission prompt is needed.
 """
 import ctypes
 import ctypes.util
 import os
 import socket
+import subprocess
 import time
 import traceback
 
@@ -22,12 +22,14 @@ CONTROL_KEY = 0x1000
 OPTION_KEY  = 0x0800
 KEY_X       = 0x07                 # kVK_ANSI_X
 KEY_R       = 0x0F                 # kVK_ANSI_R
+KEY_SPACE   = 0x31                 # kVK_Space
 EVENT_CLASS_KEYBOARD = 0x6B657962  # 'keyb'
 EVENT_HOTKEY_PRESSED = 5           # kEventHotKeyPressed
 PARAM_DIRECT_OBJECT  = 0x2D2D2D2D  # '----' kEventParamDirectObject
 TYPE_HOTKEY_ID       = 0x686B6964  # 'hkid' typeEventHotKeyID
 STOP_ID   = 1
 REPLAY_ID = 2
+PANEL_ID  = 3
 kProcessTransformToUIElementApplication = 4
 
 
@@ -58,6 +60,19 @@ def send_replay():
     _send(b"__REPLAY__", "Ctrl+Option+R")
 
 
+def open_panel():
+    panel = os.path.join(os.path.expanduser("~"), ".claude", "open_panel.sh")
+    if not os.path.isfile(panel):
+        log(f"Ctrl+Option+Space failed: {panel} not found")
+        return
+    try:
+        subprocess.Popen(["/bin/bash", panel],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log("Ctrl+Option+Space opened Omnicapable Voice panel")
+    except Exception as exc:
+        log(f"Ctrl+Option+Space failed to open panel: {exc}")
+
+
 class EventTypeSpec(ctypes.Structure):
     _fields_ = [("eventClass", ctypes.c_uint32), ("eventKind", ctypes.c_uint32)]
 
@@ -83,7 +98,9 @@ def _on_hotkey(_call_ref, event, _user_data):
                                  ctypes.sizeof(hk), None, ctypes.byref(hk))
     except Exception:
         pass
-    if hk.id == REPLAY_ID:
+    if hk.id == PANEL_ID:
+        open_panel()
+    elif hk.id == REPLAY_ID:
         send_replay()
     else:
         send_stop()
@@ -95,9 +112,6 @@ _handler_ref = HANDLER(_on_hotkey)
 
 
 def _load_carbon():
-    # ctypes.util.find_library("Carbon") returns None on macOS 11+ because system
-    # frameworks live in the dyld shared cache, not on disk. Load by absolute
-    # path first; dyld still resolves it from the cache.
     for path in ("/System/Library/Frameworks/Carbon.framework/Carbon",
                  "/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon",
                  ctypes.util.find_library("Carbon")):
@@ -131,8 +145,6 @@ def main():
         carbon.RunApplicationEventLoop.restype = None
         carbon.RunApplicationEventLoop.argtypes = []
 
-        # Give the faceless launchd process a WindowServer connection so it can
-        # receive the hotkey, without showing a Dock icon.
         try:
             psn = ProcessSerialNumber(0, 2)  # {0, kCurrentProcess}
             carbon.TransformProcessType(ctypes.byref(psn),
@@ -157,7 +169,13 @@ def main():
                                               ctypes.byref(replay_ref))
         if status_r != 0:
             log(f"RegisterEventHotKey(replay) FAILED (status {status_r}); Ctrl+Option+R may be taken.")
-        log("Registered Ctrl+Option+X (stop) and Ctrl+Option+R (replay) (Carbon, no permission needed).")
+        panel_ref = ctypes.c_void_p()
+        status_p = carbon.RegisterEventHotKey(KEY_SPACE, CONTROL_KEY | OPTION_KEY,
+                                              EventHotKeyID(0x54545353, PANEL_ID), target, 0,
+                                              ctypes.byref(panel_ref))
+        if status_p != 0:
+            log(f"RegisterEventHotKey(open panel) FAILED (status {status_p}); Ctrl+Option+Space may be taken.")
+        log("Registered Ctrl+Option+X (stop), Ctrl+Option+R (replay), and Ctrl+Option+Space (open panel) (Carbon, no permission needed).")
         carbon.RunApplicationEventLoop()
     except Exception as exc:
         log("ERROR in hotkey daemon: " + repr(exc))

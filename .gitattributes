@@ -1,0 +1,19 @@
+# Normalise line endings so editing on different platforms does not create
+# whole-file "changed" diffs.
+* text=auto eol=lf
+
+# Windows scripts must keep CRLF (and .ps1 must stay UTF-8 with BOM).
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Unix scripts must stay LF or they will not execute.
+*.sh  text eol=lf
+
+# Binary assets - never transform.
+*.png binary
+*.gif binary
+*.jpg binary
+*.ico binary
+*.onnx binary
+*.bin binary

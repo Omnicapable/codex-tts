@@ -1,8 +1,16 @@
 # -*- coding: utf-8 -*-
-# codex_tts_watcher.py v1.5 - Automatic TTS for Claude Code (Codex) rollout JSONL sessions.
+# codex_tts_watcher.py v1.8 - Automatic TTS for Claude Code (Codex) rollout JSONL sessions.
 # Monitors ~/.codex/sessions and speaks completed assistant messages via Kokoro on port 59001.
 # Shares the Kokoro server and TTS toggle with Claude Code TTS / Claude Cowork TTS.
 #
+# v1.8: Per-system voice/speed. Every utterance is tagged "SYS=codex|" so the server
+#        applies the voice and speed chosen for Codex in the panel. This watcher stores
+#        NO settings of its own - they live server-side in ~/.claude/tts_systems.json -
+#        so a setting change needs no reload here and a restart cannot lose one.
+#        Requires tts_server v3.4+; older servers ignore the tag and use the global voice.
+# v1.6: Panel status endpoint on 127.0.0.1:59012 (GET /state, POST /replay, POST /mode)
+#        so the Omnicapable Voice panel can show a Codex chip, replay this system, and
+#        switch between Final Replies and Final + Thinking.
 # v1.5: Hook removed — watcher-only. The Stop hook added double-speaking of the final
 #        reply (watcher + hook both caught the same message). Watcher coverage is complete;
 #        the hook provided no additional reliability benefit. Matches Cowork TTS design.
@@ -37,6 +45,12 @@ KOKORO_RETRY_SECONDS    = 15
 LOG_ROTATE_BYTES        = 1_048_576
 MESSAGE_MAX_AGE_SECONDS = 180
 STATE_MAX_AGE_DAYS      = 7
+SYSTEM_NAME             = "codex"   # v1.8: identifies this system to the server
+# Defined up here (not beside the status server below) because send_to_kokoro uses
+# it, and the hotkey thread can call that before the bottom of the file has run.
+_CONTROL_PREFIXES = ("__STOP__", "__REPLAY__", "__PREVIEW", "__SET_", "__GET_", "__SPEAK__")
+# Legacy per-watcher voice. Since v1.8 this is only a FALLBACK: a Codex voice
+# picked in the panel wins over it. Left in place so hand-edited installs work.
 WATCHER_VOICE           = None  # e.g. "am_adam"
 DEFAULT_MESSAGE_MODE    = os.environ.get("CODEX_TTS_MESSAGE_MODE", "final").strip().lower()
 ENABLE_HOTKEY = os.environ.get("TTS_ENABLE_GLOBAL_HOTKEY", "").lower() in {"1", "true", "yes", "on"}
@@ -94,12 +108,17 @@ def send_to_kokoro(text):
         log(f"Kokoro unavailable; skipped {len(text)} chars during cooldown")
         return False
     payload = f"VOICE={WATCHER_VOICE}|{text}" if WATCHER_VOICE else text
+    # v1.8: tag real speech with this system so the server can apply the voice and
+    # speed chosen for Codex. Control commands are instructions, not utterances.
+    if not text.startswith(_CONTROL_PREFIXES):
+        payload = f"SYS={SYSTEM_NAME}|{payload}"
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(5)
             s.connect((HOST, PORT))
             s.sendall(payload.encode("utf-8"))
         log(f"Spoke {len(text)} chars")
+        _remember_spoken(text)
         kokoro_retry_after = 0
         return True
     except Exception as e:
@@ -329,13 +348,119 @@ def check_rollout(path):
             log("TTS disabled; skipped assistant message")
 
 
+
+# --- Panel status endpoint (loopback only) ----------------------------------
+# The Omnicapable Voice panel (127.0.0.1:59010) polls this to decide whether to
+# show a chip for this system, and to route Replay and the reading-mode toggle at it. Bound to
+# 127.0.0.1 only, so it is unreachable from the network. If the port is already
+# taken the watcher logs it and carries on — status is a convenience, never a
+# reason to stop speaking.
+STATUS_PORT     = 59012
+WATCHER_VERSION = "1.8"
+# SYSTEM_NAME and _CONTROL_PREFIXES are defined in the config block at the top.
+
+_last_spoken = {"text": ""}          # last real utterance, for panel replay
+
+
+def _remember_spoken(text):
+    """Record the last genuine utterance so the panel can replay it.
+
+    Control commands and voice-prefixed payloads are not speech, so they must
+    not overwrite what Replay would say."""
+    try:
+        body = text.split("|", 1)[1] if text.startswith("VOICE=") else text
+        if body and not body.startswith(_CONTROL_PREFIXES):
+            _last_spoken["text"] = body
+    except Exception:
+        pass
+
+
+def _status_payload():
+    return {
+        "system":    SYSTEM_NAME,
+        "version":   WATCHER_VERSION,
+        "mode":      message_mode(),
+        "last_text": _last_spoken["text"][:400],
+        "enabled":   is_enabled(),
+    }
+
+
+def _start_status_server():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def _cors(self):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+        def _json(self, obj, code=200):
+            body = json.dumps(obj).encode("utf-8")
+            self.send_response(code); self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _body(self):
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                return json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                return {}
+
+        def do_OPTIONS(self):
+            self.send_response(204); self._cors(); self.end_headers()
+
+        def do_GET(self):
+            if self.path.split("?")[0] in ("/state", "/"):
+                self._json(_status_payload())
+            else:
+                self._json({"error": "not found"}, 404)
+
+        def do_POST(self):
+            path = self.path.split("?")[0]
+            if path == "/replay":
+                text = _last_spoken["text"]
+                if not text:
+                    self._json({"ok": False, "error": "nothing spoken yet"}, 409); return
+                threading.Thread(target=send_to_kokoro, args=(text,), daemon=True).start()
+                self._json({"ok": True})
+            elif path == "/mode":
+                mode = str(self._body().get("mode", "")).strip().lower()
+                if mode not in ("final", "all"):
+                    self._json({"ok": False, "error": "mode must be 'final' or 'all'"}, 400); return
+                try:
+                    os.makedirs(os.path.dirname(MESSAGE_MODE_FILE), exist_ok=True)
+                    with open(MESSAGE_MODE_FILE, "w", encoding="utf-8") as f:
+                        f.write(mode)
+                    log(f"Panel set message mode to '{mode}'")
+                    self._json({"ok": True, "mode": mode})
+                except Exception as e:
+                    self._json({"ok": False, "error": str(e)}, 500)
+            else:
+                self._json({"error": "not found"}, 404)
+
+        def log_message(self, *a):        # keep the watcher log readable
+            pass
+
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", STATUS_PORT), Handler)
+    except OSError as e:
+        log(f"Panel status endpoint unavailable on {STATUS_PORT}: {e}")
+        return
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log(f"Panel status endpoint listening on 127.0.0.1:{STATUS_PORT}")
+
 def main():
     global last_scan
     if ENABLE_HOTKEY:
         threading.Thread(target=_hotkey_poller, daemon=True).start()
     else:
         log("Ctrl+Alt+X hotkey poller disabled. Set TTS_ENABLE_GLOBAL_HOTKEY=1 to enable it.")
-    log("codex_tts_watcher v1.5 started. Monitoring Claude Code rollout JSONL files.")
+    _start_status_server()
+    log("codex_tts_watcher v1.8 started. Monitoring Claude Code rollout JSONL files.")
     total = add_new_rollouts(initial_scan=True)
     log(f"Initial scan found {total} rollout file(s).")
     last_scan = time.time()
